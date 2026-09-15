@@ -1,41 +1,54 @@
 {
-  "version": 1,
-  "nodes": [
-    {
-      "id": "user",
-      "type": "external.user",
-      "label": "Browser / User"
-    },
-    {
-      "id": "birthday-card-generator",
-      "type": "service.ec2",
-      "label": "birthday-card-generator",
-      "props": {
-        "language": "python",
-        "framework": "flask + gunicorn",
-        "instance_type": "t3.micro",
-        "region": "us-east-1"
-      }
-    },
-    {
-      "id": "sqlite",
-      "type": "resource.database",
-      "label": "SQLite (on-disk)",
-      "props": {
-        "engine": "sqlite",
-        "location": "EC2 local disk"
-      }
-    }
-  ],
   "edges": [
-    { "from": "user", "to": "birthday-card-generator", "kind": "uses", "label": "HTTP :80" },
-    { "from": "birthday-card-generator", "to": "sqlite", "kind": "depends_on", "label": "reads/writes cards.db" }
+    {
+      "from": "user",
+      "kind": "serves",
+      "label": "HTTP :80",
+      "to": "svc_01a0a4ca0862efa392fb4d08e75d69d8"
+    },
+    {
+      "from": "svc_01a0a4ca0862efa392fb4d08e75d69d8",
+      "kind": "uses",
+      "label": "reads/writes cards.db",
+      "to": "sqlite-db"
+    }
   ],
   "groups": [
     {
-      "id": "production",
+      "id": "grp-production",
+      "kind": "environment",
       "label": "production (us-east-1)",
-      "members": ["birthday-card-generator", "sqlite"]
+      "members": [
+        "svc_01a0a4ca0862efa392fb4d08e75d69d8",
+        "sqlite-db"
+      ],
+      "ref": "env_01a0a4c9aab6fcca430533b758d82ab2"
     }
-  ]
+  ],
+  "nodes": [
+    {
+      "id": "user",
+      "label": "Browser / User",
+      "type": "external.user"
+    },
+    {
+      "id": "svc_01a0a4ca0862efa392fb4d08e75d69d8",
+      "label": "birthday-card-generator",
+      "props": {
+        "instance_type": "t3.micro",
+        "region": "us-east-1"
+      },
+      "type": "service.ec2"
+    },
+    {
+      "id": "sqlite-db",
+      "label": "SQLite (on-disk)",
+      "type": "resource.database"
+    }
+  ],
+  "scope": {
+    "id": "svc_01a0a4ca0862efa392fb4d08e75d69d8",
+    "kind": "service"
+  },
+  "version": 1
 }

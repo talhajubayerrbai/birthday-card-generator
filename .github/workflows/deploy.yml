@@ -88,12 +88,13 @@ jobs:
       public_dns: ${{ steps.tf_out.outputs.public_dns }}
 
   # -------------------------------------------------------------------------
-  # 3. Verify
+  # 3. Verify  (up to 20 min — user-data bootstrap can be slow on cold t3.micro)
   # -------------------------------------------------------------------------
   verify:
     name: Verify
     runs-on: ubuntu-latest
     needs: provision
+    timeout-minutes: 20
 
     steps:
       - name: Wait for app to answer HTTP 200
@@ -102,13 +103,13 @@ jobs:
           PUBLIC_DNS: ${{ needs.provision.outputs.public_dns }}
         run: |
           echo "Waiting for http://$PUBLIC_DNS to return 200..."
-          DEADLINE=$((SECONDS + 300))
+          DEADLINE=$((SECONDS + 600))
           until curl -sf --max-time 10 "http://$PUBLIC_IP/health" > /dev/null 2>&1; do
             if [ $SECONDS -ge $DEADLINE ]; then
-              echo "Timed out after 5 minutes waiting for the app."
+              echo "Timed out after 10 minutes waiting for the app."
               exit 1
             fi
-            echo "  not ready yet (${SECONDS}s elapsed) — retrying in 15s"
+            echo "  not ready yet (${SECONDS}s elapsed) - retrying in 15s"
             sleep 15
           done
           echo "App is up!"

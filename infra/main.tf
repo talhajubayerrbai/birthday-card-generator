@@ -55,7 +55,7 @@ data "aws_subnets" "default" {
 }
 
 # ---------------------------------------------------------------------------
-# Security group — open 80 (HTTP) and 22 (SSH) to the world
+# Security group - open 80 (HTTP) and 22 (SSH) to the world
 # ---------------------------------------------------------------------------
 resource "aws_security_group" "app" {
   name        = "${var.service_name}-sg"
@@ -94,51 +94,52 @@ resource "aws_security_group" "app" {
 # ---------------------------------------------------------------------------
 # User-data: install Python 3, clone repo, run gunicorn via systemd on :5000
 # then redirect port 80 -> 5000 with iptables
+# NOTE: heredoc uses no indentation so the systemd unit is written correctly
 # ---------------------------------------------------------------------------
 locals {
-  user_data = <<-EOF
-    #!/bin/bash
-    set -euxo pipefail
-    exec > /var/log/userdata.log 2>&1
+  user_data = <<-USERDATA
+#!/bin/bash
+set -euxo pipefail
+exec > /var/log/userdata.log 2>&1
 
-    # System packages
-    dnf install -y python3 python3-pip git iptables-services
+# System packages
+dnf install -y python3 python3-pip git iptables-services
 
-    # Redirect port 80 -> 5000 (gunicorn runs as non-root)
-    iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-    iptables -t nat -A OUTPUT     -p tcp --dport 80 -j REDIRECT --to-port 5000
-    service iptables save || true
+# Redirect port 80 -> 5000 (gunicorn runs as non-root)
+iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
+iptables -t nat -A OUTPUT     -p tcp --dport 80 -j REDIRECT --to-port 5000
+service iptables save || true
 
-    # Clone the application
-    APP_DIR=/opt/birthday-card-generator
-    rm -rf "$APP_DIR"
-    git clone https://github.com/talhajubayerrbai/birthday-card-generator.git "$APP_DIR"
+# Clone the application
+APP_DIR=/opt/birthday-card-generator
+rm -rf "$APP_DIR"
+git clone https://github.com/talhajubayerrbai/birthday-card-generator.git "$APP_DIR"
 
-    # Install Python dependencies
-    pip3 install -r "$APP_DIR/requirements.txt"
+# Install Python dependencies
+pip3 install -r "$APP_DIR/requirements.txt"
 
-    # Systemd service
-    cat > /etc/systemd/system/birthday-card.service <<UNIT
-    [Unit]
-    Description=Birthday Card Generator (gunicorn)
-    After=network.target
+# Systemd service unit (no leading whitespace)
+cat > /etc/systemd/system/birthday-card.service <<'UNIT'
+[Unit]
+Description=Birthday Card Generator (gunicorn)
+After=network.target
 
-    [Service]
-    User=ec2-user
-    WorkingDirectory=$APP_DIR
-    Environment="DB_PATH=$APP_DIR/cards.db"
-    ExecStart=/usr/local/bin/gunicorn app:app --bind 0.0.0.0:5000 --workers 2
-    Restart=always
-    RestartSec=5
+[Service]
+User=ec2-user
+WorkingDirectory=/opt/birthday-card-generator
+Environment=DB_PATH=/opt/birthday-card-generator/cards.db
+ExecStart=/usr/local/bin/gunicorn app:app --bind 0.0.0.0:5000 --workers 2
+Restart=always
+RestartSec=5
 
-    [Install]
-    WantedBy=multi-user.target
-    UNIT
+[Install]
+WantedBy=multi-user.target
+UNIT
 
-    systemctl daemon-reload
-    systemctl enable birthday-card
-    systemctl start  birthday-card
-  EOF
+systemctl daemon-reload
+systemctl enable birthday-card
+systemctl start  birthday-card
+USERDATA
 }
 
 # ---------------------------------------------------------------------------
