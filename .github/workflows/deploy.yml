@@ -13,42 +13,186 @@ on:
         default: ""
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Test
+  # ---------------------------------------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           ref: ${{ inputs.revision || github.sha }}
-      - uses: actions/setup-python@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install -r requirements.txt
-      - run: python -c "import app; print('app imports OK')"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Smoke-test import
+        run: python -c "import app; print('app imports OK')"
+
+  # ---------------------------------------------------------------------------
+  # 2. Provision — Terraform creates/updates the EC2 instance and key pair.
+  #    The SSH private key is captured from Terraform state (sensitive output)
+  #    and written as a masked step output for the Ansible job.
+  # ---------------------------------------------------------------------------
   provision:
     name: Provision (Terraform)
     runs-on: ubuntu-latest
     needs: test
-    steps:
-      - run: echo "provision"
-    outputs:
-      public_ip: ""
-      public_dns: ""
-      instance_id: ""
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ${{ vars.AWS_REGION }}
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+          terraform_wrapper: false
+
+      - name: Terraform init
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform apply
+        working-directory: infra
+        run: |
+          terraform apply -input=false -auto-approve \
+            -var="aws_region=${{ vars.AWS_REGION }}" \
+            -var="service_name=${{ vars.SERVICE_NAME }}"
+
+      - name: Capture outputs
+        id: tf_out
+        working-directory: infra
+        run: |
+          PUBLIC_IP=$(terraform output -raw public_ip)
+          PUBLIC_DNS=$(terraform output -raw public_dns)
+          INSTANCE_ID=$(terraform output -raw instance_id)
+          SSH_KEY=$(terraform output -raw ssh_private_key)
+          echo "::add-mask::$SSH_KEY"
+          echo "public_ip=$PUBLIC_IP"       >> $GITHUB_OUTPUT
+          echo "public_dns=$PUBLIC_DNS"     >> $GITHUB_OUTPUT
+          echo "instance_id=$INSTANCE_ID"  >> $GITHUB_OUTPUT
+          echo "$SSH_KEY" > /tmp/ec2_key.pem
+          chmod 600 /tmp/ec2_key.pem
+
+      - name: Upload SSH key artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ec2-ssh-key
+          path: /tmp/ec2_key.pem
+          retention-days: 1
+          if-no-files-found: error
+
+    outputs:
+      public_ip:   ${{ steps.tf_out.outputs.public_ip }}
+      public_dns:  ${{ steps.tf_out.outputs.public_dns }}
+      instance_id: ${{ steps.tf_out.outputs.instance_id }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Deploy — Ansible SSHs into the instance and installs the app.
+  # ---------------------------------------------------------------------------
   deploy:
     name: Deploy (Ansible)
     runs-on: ubuntu-latest
     needs: provision
     timeout-minutes: 20
-    steps:
-      - run: echo "ansible deploy"
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ${{ vars.AWS_REGION }}
+      PUBLIC_IP:             ${{ needs.provision.outputs.public_ip }}
+      PUBLIC_DNS:            ${{ needs.provision.outputs.public_dns }}
 
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Download SSH key artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ec2-ssh-key
+          path: /tmp/
+
+      - name: Fix SSH key permissions
+        run: chmod 600 /tmp/ec2_key.pem
+
+      - name: Install Ansible
+        run: pip install --quiet ansible
+
+      - name: Wait for EC2 SSH to be ready
+        run: |
+          echo "Waiting for SSH on $PUBLIC_IP..."
+          DEADLINE=$((SECONDS + 180))
+          until ssh -i /tmp/ec2_key.pem \
+                    -o StrictHostKeyChecking=no \
+                    -o UserKnownHostsFile=/dev/null \
+                    -o ConnectTimeout=5 \
+                    ec2-user@"$PUBLIC_IP" 'echo ready' 2>/dev/null; do
+            if [ $SECONDS -ge $DEADLINE ]; then
+              echo "SSH not available after 3 minutes — aborting."
+              exit 1
+            fi
+            echo "  SSH not ready yet (${SECONDS}s) — retrying in 10s"
+            sleep 10
+          done
+          echo "SSH is ready."
+
+      - name: Run Ansible playbook
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+          GIT_REF: ${{ inputs.revision || github.sha }}
+        run: |
+          ansible-playbook ansible/deploy.yml \
+            --inventory "$PUBLIC_IP," \
+            --private-key /tmp/ec2_key.pem \
+            --user ec2-user \
+            -e "git_ref=$GIT_REF" \
+            -v
+
+  # ---------------------------------------------------------------------------
+  # 4. Verify — poll the public address until the app answers 200.
+  # ---------------------------------------------------------------------------
   verify:
     name: Verify
     runs-on: ubuntu-latest
     needs: [provision, deploy]
     timeout-minutes: 15
+
     steps:
-      - run: echo "verify"
+      - name: Poll health endpoint
+        env:
+          PUBLIC_IP:  ${{ needs.provision.outputs.public_ip }}
+          PUBLIC_DNS: ${{ needs.provision.outputs.public_dns }}
+        run: |
+          echo "Polling http://$PUBLIC_IP:5000/health ..."
+          DEADLINE=$((SECONDS + 300))
+          until curl -sf --max-time 10 "http://$PUBLIC_IP:5000/health" > /dev/null 2>&1; do
+            if [ $SECONDS -ge $DEADLINE ]; then
+              echo "Timed out after 5 minutes — app did not answer."
+              exit 1
+            fi
+            echo "  not ready yet (${SECONDS}s elapsed) — retrying in 10s"
+            sleep 10
+          done
+          echo "App is up!"
+          echo "Live URL: http://$PUBLIC_DNS:5000"
+          echo "Live URL (port 80 via iptables): http://$PUBLIC_DNS"
