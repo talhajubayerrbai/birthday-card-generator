@@ -76,7 +76,6 @@
       ansible.builtin.pip:
         requirements: "{{ app_dir }}/requirements.txt"
         executable: pip3
-        extra_args: "--break-system-packages"
 
     # ------------------------------------------------------------------
     # 5. Ensure db file is owned by app user
