@@ -1,0 +1,48 @@
+name: Destroy birthday-card-generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Git ref / SHA"
+        required: false
+        default: ""
+      udap_run_id:
+        description: "UDAP run identifier"
+        required: false
+        default: ""
+
+jobs:
+  destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ${{ vars.AWS_REGION }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform init
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: Terraform destroy
+        working-directory: infra
+        run: |
+          terraform destroy -input=false -auto-approve \
+            -var="aws_region=${{ vars.AWS_REGION }}" \
+            -var="service_name=${{ vars.SERVICE_NAME }}"

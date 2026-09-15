@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Happy Birthday, {{ card['recipient'] }}!{% endblock %}
+{% block head %}
+<style>
+  body { background: {{ style.bg }}; }
+</style>
+{% endblock %}
+{% block content %}
+<section class="card-view" style="--bg:{{ style.bg }};--accent:{{ style.accent }};--text:{{ style.text }};">
+
+  <div class="card-envelope">
+    <div class="balloon-row" aria-hidden="true">
+      🎈🎂🎈
+    </div>
+
+    <h1 class="card-heading">Happy Birthday,<br><span class="card-recipient">{{ card['recipient'] }}</span>!</h1>
+
+    <div class="card-message">
+      {{ card['message'] }}
+    </div>
+
+    <p class="card-from">— with love from <strong>{{ card['sender'] }}</strong></p>
+
+    <div class="confetti-row" aria-hidden="true">
+      🎉✨🎊✨🎉
+    </div>
+  </div>
+
+  <div class="share-box">
+    <p>Share this card:</p>
+    <div class="share-url-row">
+      <input type="text" id="shareUrl" readonly
+             value="{{ request.host_url }}card/{{ card['id'] }}" />
+      <button onclick="copyUrl()" class="btn-copy">Copy link</button>
+    </div>
+    <a href="/" class="btn-secondary">Create another card →</a>
+  </div>
+</section>
+
+<script>
+function copyUrl() {
+  const el = document.getElementById('shareUrl');
+  el.select();
+  navigator.clipboard.writeText(el.value).then(() => {
+    const btn = document.querySelector('.btn-copy');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy link', 2000);
+  });
+}
+</script>
+{% endblock %}

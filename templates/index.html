@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Create a Birthday Card{% endblock %}
+{% block content %}
+<section class="hero">
+  <h1>Create a Personalised<br><span class="accent">Birthday Card</span></h1>
+  <p class="subtitle">Fill in the details, pick a style, and get a shareable link instantly.</p>
+</section>
+
+<section class="form-card">
+  <form action="/create" method="POST">
+
+    <div class="field">
+      <label for="recipient">🎁 Recipient's name</label>
+      <input type="text" id="recipient" name="recipient" placeholder="e.g. Alice" required maxlength="60" />
+    </div>
+
+    <div class="field">
+      <label for="sender">✍️  Your name</label>
+      <input type="text" id="sender" name="sender" placeholder="e.g. Bob" required maxlength="60" />
+    </div>
+
+    <div class="field">
+      <label for="message">💬 Personal message <span class="muted">(optional)</span></label>
+      <textarea id="message" name="message" rows="3"
+        placeholder="Leave a heartfelt message…" maxlength="400"></textarea>
+    </div>
+
+    <div class="field">
+      <label>🎨 Card style</label>
+      <div class="style-grid">
+        {% for s in styles %}
+        <label class="style-option">
+          <input type="radio" name="style" value="{{ s.key }}"
+            {% if loop.first %}checked{% endif %}>
+          <span class="swatch" style="background:{{ s.bg }}; border-color:{{ s.accent }};">
+            {{ s.label }}
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <button type="submit" class="btn-primary">🎉 Generate Card</button>
+  </form>
+</section>
+{% endblock %}

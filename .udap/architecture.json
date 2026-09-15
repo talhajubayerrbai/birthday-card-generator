@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "nodes": [
+    {
+      "id": "user",
+      "type": "external.user",
+      "label": "Browser / User"
+    },
+    {
+      "id": "birthday-card-generator",
+      "type": "service.ec2",
+      "label": "birthday-card-generator",
+      "props": {
+        "language": "python",
+        "framework": "flask + gunicorn",
+        "instance_type": "t3.micro",
+        "region": "us-east-1"
+      }
+    },
+    {
+      "id": "sqlite",
+      "type": "resource.database",
+      "label": "SQLite (on-disk)",
+      "props": {
+        "engine": "sqlite",
+        "location": "EC2 local disk"
+      }
+    }
+  ],
+  "edges": [
+    { "from": "user", "to": "birthday-card-generator", "kind": "uses", "label": "HTTP :80" },
+    { "from": "birthday-card-generator", "to": "sqlite", "kind": "depends_on", "label": "reads/writes cards.db" }
+  ],
+  "groups": [
+    {
+      "id": "production",
+      "label": "production (us-east-1)",
+      "members": ["birthday-card-generator", "sqlite"]
+    }
+  ]
+}
