@@ -1,0 +1,191 @@
+---
+# Birthday Card Generator — Ansible deploy playbook
+# Runs against a single EC2 host passed as inventory on the command line:
+#   ansible-playbook ansible/deploy.yml -i <ec2-ip>,
+
+- name: Deploy birthday-card-generator
+  hosts: all
+  become: true          # sudo for systemd / package install
+  vars:
+    app_dir: /opt/birthday-card-generator
+    app_user: ec2-user
+    app_port: 5000
+    repo_url: https://github.com/talhajubayerrbai/birthday-card-generator.git
+    git_ref: "{{ lookup('env', 'GIT_REF') | default('main', true) }}"
+
+  tasks:
+
+    # ------------------------------------------------------------------
+    # 1. System packages
+    # ------------------------------------------------------------------
+    - name: Install system packages
+      ansible.builtin.dnf:
+        name:
+          - python3
+          - python3-pip
+          - git
+        state: present
+        update_cache: true
+
+    # ------------------------------------------------------------------
+    # 2. App directory
+    # ------------------------------------------------------------------
+    - name: Ensure app directory exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    # ------------------------------------------------------------------
+    # 3. Copy app source from the runner (checked-out repo)
+    # ------------------------------------------------------------------
+    - name: Copy Flask application files
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ app_dir }}/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+      loop:
+        - app.py
+        - requirements.txt
+        - Procfile
+
+    - name: Copy templates directory
+      ansible.builtin.copy:
+        src: templates/
+        dest: "{{ app_dir }}/templates/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    - name: Copy static directory
+      ansible.builtin.copy:
+        src: static/
+        dest: "{{ app_dir }}/static/"
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0644"
+
+    # ------------------------------------------------------------------
+    # 4. Python dependencies
+    # ------------------------------------------------------------------
+    - name: Install Python dependencies
+      ansible.builtin.pip:
+        requirements: "{{ app_dir }}/requirements.txt"
+        executable: pip3
+        extra_args: "--break-system-packages"
+
+    # ------------------------------------------------------------------
+    # 5. Ensure db file is owned by app user
+    # ------------------------------------------------------------------
+    - name: Touch SQLite database file
+      ansible.builtin.file:
+        path: "{{ app_dir }}/cards.db"
+        state: touch
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0664"
+        modification_time: preserve
+        access_time: preserve
+
+    # ------------------------------------------------------------------
+    # 6. systemd unit
+    # ------------------------------------------------------------------
+    - name: Write systemd service unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/birthday-card.service
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Birthday Card Generator (gunicorn)
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          WorkingDirectory={{ app_dir }}
+          Environment=DB_PATH={{ app_dir }}/cards.db
+          ExecStart=/usr/local/bin/gunicorn app:app \
+              --bind 0.0.0.0:{{ app_port }} \
+              --workers 2 \
+              --timeout 60
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart birthday-card
+
+    # ------------------------------------------------------------------
+    # 7. iptables redirect 80 -> 5000 (gunicorn runs as non-root)
+    # ------------------------------------------------------------------
+    - name: Install iptables-services
+      ansible.builtin.dnf:
+        name: iptables-services
+        state: present
+
+    - name: Add PREROUTING redirect 80 -> 5000
+      ansible.builtin.iptables:
+        table: nat
+        chain: PREROUTING
+        protocol: tcp
+        destination_port: "80"
+        jump: REDIRECT
+        to_ports: "5000"
+        state: present
+
+    - name: Add OUTPUT redirect 80 -> 5000 (loopback)
+      ansible.builtin.iptables:
+        table: nat
+        chain: OUTPUT
+        protocol: tcp
+        destination_port: "80"
+        jump: REDIRECT
+        to_ports: "5000"
+        state: present
+
+    - name: Save iptables rules
+      ansible.builtin.command: service iptables save
+      args:
+        warn: false
+      failed_when: false
+
+    # ------------------------------------------------------------------
+    # 8. Enable and start the service
+    # ------------------------------------------------------------------
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start birthday-card service
+      ansible.builtin.systemd:
+        name: birthday-card
+        enabled: true
+        state: started
+
+    # ------------------------------------------------------------------
+    # 9. Verify health inside the instance
+    # ------------------------------------------------------------------
+    - name: Wait for app to answer on port 5000
+      ansible.builtin.uri:
+        url: "http://localhost:{{ app_port }}/health"
+        status_code: 200
+      register: health_check
+      retries: 20
+      delay: 5
+      until: health_check.status == 200
+
+    - name: Print health check result
+      ansible.builtin.debug:
+        msg: "Health check passed: {{ health_check.json }}"
+
+  handlers:
+    - name: Restart birthday-card
+      ansible.builtin.systemd:
+        name: birthday-card
+        state: restarted
+        daemon_reload: true

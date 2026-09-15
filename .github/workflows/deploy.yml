@@ -13,9 +13,9 @@ on:
         default: ""
 
 jobs:
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
   # 1. Test
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -36,11 +36,13 @@ jobs:
       - name: Smoke-test import
         run: python -c "import app; print('app imports OK')"
 
-  # -------------------------------------------------------------------------
-  # 2. Provision (Terraform)
-  # -------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # 2. Provision — Terraform creates/updates the EC2 instance and key pair.
+  #    The SSH private key is captured from Terraform state (sensitive output)
+  #    and written as a masked step output for the Ansible job.
+  # ---------------------------------------------------------------------------
   provision:
-    name: Provision
+    name: Provision (Terraform)
     runs-on: ubuntu-latest
     needs: test
     env:
@@ -58,6 +60,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: "1.7.5"
+          terraform_wrapper: false   # wrapper interferes with -raw output parsing
 
       - name: Terraform init
         working-directory: infra
@@ -80,37 +83,120 @@ jobs:
         run: |
           PUBLIC_IP=$(terraform output -raw public_ip)
           PUBLIC_DNS=$(terraform output -raw public_dns)
-          echo "public_ip=$PUBLIC_IP"   >> $GITHUB_OUTPUT
-          echo "public_dns=$PUBLIC_DNS" >> $GITHUB_OUTPUT
+          INSTANCE_ID=$(terraform output -raw instance_id)
+          # Capture the private key — mask it immediately so it never appears in logs
+          SSH_KEY=$(terraform output -raw ssh_private_key)
+          echo "::add-mask::$SSH_KEY"
+          echo "public_ip=$PUBLIC_IP"       >> $GITHUB_OUTPUT
+          echo "public_dns=$PUBLIC_DNS"     >> $GITHUB_OUTPUT
+          echo "instance_id=$INSTANCE_ID"  >> $GITHUB_OUTPUT
+          # Write the key to a file rather than an env var to avoid shell quoting issues
+          echo "$SSH_KEY" > /tmp/ec2_key.pem
+          chmod 600 /tmp/ec2_key.pem
+
+      # Share the key file between jobs via an artifact (contents are masked above)
+      - name: Upload SSH key artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ec2-ssh-key
+          path: /tmp/ec2_key.pem
+          retention-days: 1
+          if-no-files-found: error
 
     outputs:
-      public_ip:  ${{ steps.tf_out.outputs.public_ip }}
-      public_dns: ${{ steps.tf_out.outputs.public_dns }}
+      public_ip:   ${{ steps.tf_out.outputs.public_ip }}
+      public_dns:  ${{ steps.tf_out.outputs.public_dns }}
+      instance_id: ${{ steps.tf_out.outputs.instance_id }}
 
-  # -------------------------------------------------------------------------
-  # 3. Verify  (up to 20 min — user-data bootstrap can be slow on cold t3.micro)
-  # -------------------------------------------------------------------------
-  verify:
-    name: Verify
+  # ---------------------------------------------------------------------------
+  # 3. Deploy — Ansible SSHs into the instance and installs the app.
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy (Ansible)
     runs-on: ubuntu-latest
     needs: provision
     timeout-minutes: 20
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION:            ${{ vars.AWS_REGION }}
+      PUBLIC_IP:             ${{ needs.provision.outputs.public_ip }}
+      PUBLIC_DNS:            ${{ needs.provision.outputs.public_dns }}
 
     steps:
-      - name: Wait for app to answer HTTP 200
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Download SSH key artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ec2-ssh-key
+          path: /tmp/
+
+      - name: Fix SSH key permissions
+        run: chmod 600 /tmp/ec2_key.pem
+
+      - name: Install Ansible
+        run: |
+          pip install --quiet ansible
+
+      - name: Wait for EC2 SSH to be ready
+        run: |
+          echo "Waiting for SSH on $PUBLIC_IP..."
+          DEADLINE=$((SECONDS + 180))
+          until ssh -i /tmp/ec2_key.pem \
+                    -o StrictHostKeyChecking=no \
+                    -o UserKnownHostsFile=/dev/null \
+                    -o ConnectTimeout=5 \
+                    ec2-user@"$PUBLIC_IP" 'echo ready' 2>/dev/null; do
+            if [ $SECONDS -ge $DEADLINE ]; then
+              echo "SSH not available after 3 minutes — aborting."
+              exit 1
+            fi
+            echo "  SSH not ready yet (${SECONDS}s) — retrying in 10s"
+            sleep 10
+          done
+          echo "SSH is ready."
+
+      - name: Run Ansible playbook
+        env:
+          ANSIBLE_CONFIG: ansible/ansible.cfg
+          GIT_REF: ${{ inputs.revision || github.sha }}
+        run: |
+          ansible-playbook ansible/deploy.yml \
+            --inventory "$PUBLIC_IP," \
+            --private-key /tmp/ec2_key.pem \
+            --user ec2-user \
+            -e "git_ref=$GIT_REF" \
+            -v
+
+  # ---------------------------------------------------------------------------
+  # 4. Verify — poll the public address until the app answers 200.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    needs: [provision, deploy]
+    timeout-minutes: 15
+
+    steps:
+      - name: Poll health endpoint
         env:
           PUBLIC_IP:  ${{ needs.provision.outputs.public_ip }}
           PUBLIC_DNS: ${{ needs.provision.outputs.public_dns }}
         run: |
-          echo "Waiting for http://$PUBLIC_DNS to return 200..."
-          DEADLINE=$((SECONDS + 600))
-          until curl -sf --max-time 10 "http://$PUBLIC_IP/health" > /dev/null 2>&1; do
+          echo "Polling http://$PUBLIC_IP:5000/health ..."
+          DEADLINE=$((SECONDS + 300))
+          until curl -sf --max-time 10 "http://$PUBLIC_IP:5000/health" > /dev/null 2>&1; do
             if [ $SECONDS -ge $DEADLINE ]; then
-              echo "Timed out after 10 minutes waiting for the app."
+              echo "Timed out after 5 minutes — app did not answer."
               exit 1
             fi
-            echo "  not ready yet (${SECONDS}s elapsed) - retrying in 15s"
-            sleep 15
+            echo "  not ready yet (${SECONDS}s elapsed) — retrying in 10s"
+            sleep 10
           done
           echo "App is up!"
-          echo "Live URL: http://$PUBLIC_DNS"
+          echo "Live URL: http://$PUBLIC_DNS:5000"
+          echo "Live URL (port 80 via iptables): http://$PUBLIC_DNS"
