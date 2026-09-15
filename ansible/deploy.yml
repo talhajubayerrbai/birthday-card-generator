@@ -43,7 +43,7 @@
     # ------------------------------------------------------------------
     - name: Copy Flask application files
       ansible.builtin.copy:
-        src: "{{ item }}"
+        src: "{{ playbook_dir }}/../{{ item }}"
         dest: "{{ app_dir }}/"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
@@ -55,7 +55,7 @@
 
     - name: Copy templates directory
       ansible.builtin.copy:
-        src: templates/
+        src: "{{ playbook_dir }}/../templates/"
         dest: "{{ app_dir }}/templates/"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
@@ -63,7 +63,7 @@
 
     - name: Copy static directory
       ansible.builtin.copy:
-        src: static/
+        src: "{{ playbook_dir }}/../static/"
         dest: "{{ app_dir }}/static/"
         owner: "{{ app_user }}"
         group: "{{ app_user }}"
